@@ -4,6 +4,7 @@ import requests
 import sqlite3
 import re
 import os
+import json
 
 SERVER_URL = "http://localhost:3000"
 
@@ -21,7 +22,6 @@ def get_last_fetched_time():
     except Exception as e:
         print(f"Error fetching last fetched time: {e}")
         return "_FAIL_"
-
 
 def update_last_fetched_time(timestamp):
     try:
@@ -84,7 +84,7 @@ def extract_rtf_text(data):
     except Exception as e:
         print(f"Error extracting text: {e}")
         return "Unreadable message content"
-    
+
 def prompt_mac_permission():
     print("""
     🚨 macOS Permission Required 🚨
@@ -98,6 +98,45 @@ def prompt_mac_permission():
 
     🔁 Then restart the script
     """)
+
+def load_address_book(path="addressbook.json"):
+    try:
+        with open(path, "r") as f:
+            return f.read()  # Return raw JSON string
+    except Exception as e:
+        print(f"Error loading address book: {e}")
+        return "[]"
+
+def normalize_number(number):
+    return re.sub(r"[^\d]", "", number or "").strip()
+
+def combine_data(recent_messages, addressBookData):
+    try:
+        addressBookData = json.loads(addressBookData)
+    except Exception as e:
+        print(f"⚠️ Failed to parse addressBookData: {e}")
+        addressBookData = []
+
+    for message in recent_messages:
+        phone_number_raw = message.get("phone_number", "")
+        phone_number = normalize_number(phone_number_raw)
+
+        matched_contact = None
+        for contact in addressBookData:
+            contact_number_raw = contact.get("NUMBERCLEAN", "")
+            contact_number = normalize_number(contact_number_raw)
+            if phone_number == contact_number:
+                matched_contact = contact
+                break
+
+        if matched_contact:
+            message["first_name"] = matched_contact.get("FIRSTNAME", "")
+            message["last_name"] = matched_contact.get("LASTNAME", "")
+        else:
+            message["first_name"] = ""
+            message["last_name"] = ""
+
+    return recent_messages
 
 
 def read_messages(db_location, last_timestamp):
@@ -125,7 +164,7 @@ def read_messages(db_location, last_timestamp):
                 body = extract_rtf_text(attributed_body)
             
             phone_number = handle_id or "Me"
-            mapped_name = mapping.get(cache_roomname, "Unknown")
+            mapped_name = mapping.get(cache_roomname, "")
 
             # Convert Apple timestamp to datetime
             mod_date = datetime.datetime(2001, 1, 1)
@@ -150,7 +189,8 @@ def read_messages(db_location, last_timestamp):
 def run_continuously(db_location):
     # Initial delay to ensure server is up
     time.sleep(2)
-    
+    address_book_json = load_address_book()
+
     while True:
         try:
             # Get the last timestamp we processed from the server
@@ -167,23 +207,21 @@ def run_continuously(db_location):
             else:
                 print(f"🔄 Checking for new messages since {last_processed_timestamp}...")
                 messages = read_messages(db_location, last_processed_timestamp)
-            
+
             newest_timestamp = get_current_apple_timestamp()
 
             if messages:
+                messages = combine_data(messages, address_book_json)
                 print(f"📨 Found {len(messages)} new messages")
                 if send_to_api(messages, newest_timestamp):
                     print(f"✅ Successfully processed {len(messages)} messages")
-                    print(f"🕒 Updated timestamp to: {newest_timestamp}")
                     update_last_fetched_time(newest_timestamp)
                 else:
                     print("⚠️ Failed to send messages, will retry next cycle")
             else:
                 print("ℹ️  No new messages found")
-                print(f"🕒 Still updating last fetched time to: {newest_timestamp}")
                 update_last_fetched_time(newest_timestamp)
 
-            # Wait for 1 minute before checking again (adjust as needed)
             print("⏳ Waiting for 60 seconds before next check...")
             time.sleep(60)
             
@@ -196,7 +234,7 @@ def has_permission(db_location):
     return os.access(db_location, os.R_OK)
 
 if __name__ == "__main__":
-    db_location = "/Users/achit226/Library/Messages/chat.db"  # Update with your DB path
+    db_location = "/Users/achit226/Library/Messages/chat.db"
 
     if not has_permission(db_location):
         print("❗ Cannot read the database file.")
